@@ -1,0 +1,2 @@
+# Whisper_with_rotary_encoder_and_learned-sinusoid_rotary_decoder_and_training
+Whisper_with_rotary_encoder_and_learned-sinusoid_rotary_decoder_and_training
