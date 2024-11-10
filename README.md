@@ -1,7 +1,8 @@
 # Whisper_with_rotary_encoder_and_learned-sinusoid_rotary_decoder_and_training
 Whisper with rotary encoder and learned-sinusoid-rotary decoder RMSnorm
 
-My goal is to attempt to mitigate catastrophic forgetting in Whisper through different embedding schemes. By encoding positional information directly into the attention mechanism, rotary embeddings might allow the model to generalize better to different sequence lengths and potentially reduce the reliance on absolute positional information that could be specific to the pretraining data. Making the sinusoidal embeddings learnable allows them to adapt to the fine-tuning data, potentially reducing the conflict between the pretrained positional information and the new data.
+The goal with these models is to observe the effects different embedding schema may have on catastrophic forgetting in Whisper. By encoding positional information directly into the attention mechanism, rotary embeddings might allow the model to generalize better to different sequence lengths and potentially reduce the reliance on absolute positional information that could be specific to the pretraining data. Making the sinusoidal embeddings learnable in the decoder allows the model to adapt to fine-tuning data, potentially reducing the conflict between the pretrained positional information and the new data.
+Warmstarting was necessary.
 
 Other strategies to consider:
 
