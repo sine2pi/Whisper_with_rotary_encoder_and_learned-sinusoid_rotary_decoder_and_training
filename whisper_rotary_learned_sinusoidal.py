@@ -1,12 +1,11 @@
-
 ## Whisper with rotary encoder and learned-sinusoid rotary decoder
 
-import multiprocessing
+# import multiprocessing
 from torch.profiler import profile, record_function, ProfilerActivity
 from torch.nn.utils.rnn import pad_sequence
 import torchaudio.transforms as at
 from torch.utils.data import Dataset
-from data_loader import eval_dataloader, train_dataloader
+#from data_loader import eval_dataloader, train_dataloader
 import torch.utils.data as Data
 import base64, csv, torchaudio, neologdn, evaluate, MeCab, gzip, numpy as np, torch.nn.functional as F, torch, whisper
 from contextlib import contextmanager
@@ -33,7 +32,7 @@ from decoding import detect_language as detect_language_function
 from transcribe import transcribe as transcribe_function
 from transformers import Adafactor
 from tqdm import tqdm
-import torch
+import torch, os, time
 import torch.optim as optim
 import torch.nn as nn
 from torch.amp import autocast, GradScaler
@@ -49,6 +48,8 @@ except (ImportError, RuntimeError, OSError):
 
 import torch
 from transformers import WhisperForConditionalGeneration
+
+
 
 @dataclass
 class ModelDimensions:
@@ -78,7 +79,7 @@ class LayerNorm(nn.Module): #RMSNorm
 
     def forward(self, x):
         gamma = self.g + float(self.unit_offset)
-        return F.normalize(x, dim = -1, eps=1e-5) * self.scale * gamma
+        return F.normalize(x, dim = -1) * self.scale * gamma
     
 class Linear(nn.Linear):
     def forward(self, x: Tensor) -> Tensor:
@@ -95,8 +96,8 @@ class Conv1d(nn.Conv1d):
         return super()._conv_forward(
             x, weight.to(x.dtype), None if bias is None else bias.to(x.dtype)
         )
+    
 def sinusofeatures(length, channels, max_timescale=10000):
-    '''Returns sinusofeatures for positional embedding'''
     assert channels % 2 == 0
     log_timescale_increment = np.log(max_timescale) / (channels // 2 - 1)
     inv_timescales = torch.exp(-log_timescale_increment * torch.arange(channels // 2))
@@ -114,6 +115,7 @@ def disable_sdpa():
 
 class MultiHeadAttention(nn.Module):
     use_sdpa = True
+
     def __init__(self, n_state: int, n_head: int):
         super().__init__()
         self.n_head = n_head
@@ -196,10 +198,10 @@ class AudioEncoder(nn.Module):
         self.ln_post = LayerNorm(n_state)
 
     def forward(self, x: torch.Tensor):
-#        print(f"Input shape: {x.shape}")  # Debug print
         x = F.gelu(self.conv1(x))
         x = F.gelu(self.conv2(x))
         x = x.permute(0, 2, 1)
+
         for block in self.blocks:
             x = checkpoint.checkpoint(block, x)
         
@@ -241,14 +243,13 @@ class TextDecoder(nn.Module):
         logits = (x @ torch.transpose(self.token_embedding.weight.to(x.dtype), 0, 1)).float()
         return logits
 
-    
+   
 class LearnedSinusoidalEmbeddings(nn.Module): # sinusofeatures(n_ctx, n_state)
     def __init__(self, n_ctx, n_state):
         super().__init__()
         self.n_ctx = n_ctx
         self.n_state = n_state
 
-        # Initialize with sinusoidal embeddings
         sinusoidal_embeddings = sinusofeatures(n_ctx, n_state)
         self.positional_embeddings = nn.Parameter(sinusoidal_embeddings)
 
@@ -336,6 +337,29 @@ class Whisper(nn.Module):
     detect_language = detect_language_function
     transcribe = transcribe_function
     decode = decode_function
+
+dimensions = ModelDimensions(
+    n_mels=128, 
+    n_audio_ctx=1500, 
+    n_audio_state=1280, 
+    n_audio_head=20, 
+    n_audio_layer=24, 
+    n_vocab=51866, 
+    n_text_ctx=448, 
+    n_text_state=1280, 
+    n_text_head=16, 
+    n_text_layer=4
+    )
+
+model = Whisper(dimensions).cuda()
+
+
+pretrained_model = WhisperForConditionalGeneration.from_pretrained('openai/whisper-large-v3-turbo')
+pretrained_state_dict = pretrained_model.state_dict()
+
+model = Whisper(dimensions).cuda()
+model_state_dict = model.state_dict()
+
 def transfer_layer(src_name, tgt_name):
     if src_name in pretrained_state_dict and tgt_name in model_state_dict:
         src_tensor = pretrained_state_dict[src_name]
@@ -344,28 +368,92 @@ def transfer_layer(src_name, tgt_name):
         print(f'Source shape: {src_tensor.shape}, Target shape: {tgt_tensor.shape}')
         tgt_tensor.copy_(src_tensor)
 
-@dataclass
-class WhisperDataCollatorWithPadding:
-    tokenizer: Any
-    padding_value: int = -100
+transfer_layer('model.encoder.conv1.weight', 'encoder.conv1.weight')
+transfer_layer('model.encoder.conv1.bias', 'encoder.conv1.bias')
+transfer_layer('model.encoder.conv2.weight', 'encoder.conv2.weight')
+transfer_layer('model.encoder.conv2.bias', 'encoder.conv2.bias')
 
-    def __call__(self, features):
-        input_features = [f["input_features"] for f in features]
-        labels = [torch.tensor(f["labels"]) for f in features]  # Convert directly to tensors
-        dec_input_features = [torch.tensor(f["dec_input_features"]) for f in features] # Convert directly to tensors
+# transfer_layer('model.encoder.embed_positions.weight', 'encoder.positional_embedding.weight')
+# transfer_layer('model.decoder.embed_positions.weight', 'decoder.positional_embedding.weight')
 
-        input_features = torch.stack(input_features)
-        labels = pad_sequence(labels, batch_first=True, padding_value=self.padding_value)
-        dec_input_features = pad_sequence(dec_input_features, batch_first=True, padding_value=self.padding_value)
+transfer_layer('model.encoder.layer_norm.weight', 'encoder.ln_post.weight')
+transfer_layer('model.encoder.layer_norm.bias', 'encoder.ln_post.bias')
+transfer_layer('model.decoder.layer_norm.weight', 'decoder.ln.weight')
+transfer_layer('model.decoder.layer_norm.bias', 'decoder.ln.bias')
 
+transfer_layer('model.decoder.embed_tokens.weight', 'decoder.token_embedding.weight') 
+
+for i in range(6):
+    transfer_layer(f'model.encoder.layers.{i}.self_attn.k_proj.weight', f'encoder.blocks.{i}.attn.key.weight')
+    transfer_layer(f'model.encoder.layers.{i}.self_attn.v_proj.weight', f'encoder.blocks.{i}.attn.value.weight')
+    transfer_layer(f'model.encoder.layers.{i}.self_attn.q_proj.weight', f'encoder.blocks.{i}.attn.query.weight')
+    transfer_layer(f'model.encoder.layers.{i}.self_attn.out_proj.weight', f'encoder.blocks.{i}.attn.out.weight')
+    transfer_layer(f'model.encoder.layers.{i}.self_attn_layer_norm.weight', f'encoder.blocks.{i}.attn_ln.weight')
+    transfer_layer(f'model.encoder.layers.{i}.self_attn_layer_norm.bias', f'encoder.blocks.{i}.attn_ln.bias')
+    transfer_layer(f'model.encoder.layers.{i}.fc1.weight', f'encoder.blocks.{i}.mlp.0.weight')
+    transfer_layer(f'model.encoder.layers.{i}.fc1.bias', f'encoder.blocks.{i}.mlp.0.bias')
+    transfer_layer(f'model.encoder.layers.{i}.fc2.weight', f'encoder.blocks.{i}.mlp.2.weight')
+    transfer_layer(f'model.encoder.layers.{i}.fc2.bias', f'encoder.blocks.{i}.mlp.2.bias')
+    transfer_layer(f'model.encoder.layers.{i}.final_layer_norm.weight', f'encoder.blocks.{i}.mlp_ln.weight')
+    transfer_layer(f'model.encoder.layers.{i}.final_layer_norm.bias', f'encoder.blocks.{i}.mlp_ln.bias')
+    transfer_layer(f'model.decoder.layers.{i}.self_attn.k_proj.weight', f'decoder.blocks.{i}.attn.key.weight')
+    transfer_layer(f'model.decoder.layers.{i}.self_attn.v_proj.weight', f'decoder.blocks.{i}.attn.value.weight')
+    transfer_layer(f'model.decoder.layers.{i}.self_attn.q_proj.weight', f'decoder.blocks.{i}.attn.query.weight')
+    transfer_layer(f'model.decoder.layers.{i}.self_attn.out_proj.weight', f'decoder.blocks.{i}.attn.out.weight')
+    transfer_layer(f'model.decoder.layers.{i}.self_attn_layer_norm.weight', f'decoder.blocks.{i}.attn_ln.weight')
+    transfer_layer(f'model.decoder.layers.{i}.self_attn_layer_norm.bias', f'decoder.blocks.{i}.attn_ln.bias')
+    transfer_layer(f'model.decoder.layers.{i}.encoder_attn.k_proj.weight', f'decoder.blocks.{i}.cross_attn.key.weight')
+    transfer_layer(f'model.decoder.layers.{i}.encoder_attn.v_proj.weight', f'decoder.blocks.{i}.cross_attn.value.weight')
+    transfer_layer(f'model.decoder.layers.{i}.encoder_attn.q_proj.weight', f'decoder.blocks.{i}.cross_attn.query.weight')
+    transfer_layer(f'model.decoder.layers.{i}.encoder_attn.out_proj.weight', f'decoder.blocks.{i}.cross_attn.out.weight')
+    transfer_layer(f'model.decoder.layers.{i}.encoder_attn_layer_norm.weight', f'decoder.blocks.{i}.cross_attn_ln.weight')
+    transfer_layer(f'model.decoder.layers.{i}.encoder_attn_layer_norm.bias', f'decoder.blocks.{i}.cross_attn_ln.bias')
+    transfer_layer(f'model.decoder.layers.{i}.fc1.weight', f'decoder.blocks.{i}.mlp.0.weight')
+    transfer_layer(f'model.decoder.layers.{i}.fc1.bias', f'decoder.blocks.{i}.mlp.0.bias')
+    transfer_layer(f'model.decoder.layers.{i}.fc2.weight', f'decoder.blocks.{i}.mlp.2.weight')
+    transfer_layer(f'model.decoder.layers.{i}.fc2.bias', f'decoder.blocks.{i}.mlp.2.bias')
+    transfer_layer(f'model.decoder.layers.{i}.final_layer_norm.weight', f'decoder.blocks.{i}.mlp_ln.weight')
+    transfer_layer(f'model.decoder.layers.{i}.final_layer_norm.bias', f'decoder.blocks.{i}.mlp_ln.bias')
+
+model.load_state_dict(model_state_dict)
+
+
+
+tokenizer = WhisperTokenizer.from_pretrained('openai/whisper-medium')
+csv_file = 'D:/proj/datasets/gvj/trimmed/metadata.csv'
+audio_dir = 'D:/proj/datasets/gvj/trimmed/'
+
+
+class WhisperDataCollatorWhithPadding:
+    def __call__(sefl, features):
+        input_features, labels, dec_input_features = [], [], []
+        for f in features:
+            input_features.append(f["input_features"])
+            labels.append(f["labels"])
+            dec_input_features.append(f["dec_input_features"])
+
+        input_features = torch.concat([input_id[None, :] for input_id in input_features])
+
+        label_lengths = [len(lab) for lab in labels]
+        dec_input_features_length = [len(e) for e in dec_input_features]
+        max_label_len = max(label_lengths+dec_input_features_length)
+
+        labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) for lab, lab_len in zip(labels, label_lengths)]
+        dec_input_features = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) for e, e_len in zip(dec_input_features, dec_input_features_length)] # 50257 is eot token id
 
         batch = {
-            "input_features": input_features,
             "labels": labels,
             "dec_input_features": dec_input_features
         }
 
+        batch = {k: torch.tensor(np.array(v), requires_grad=False) for k, v in batch.items()}
+        batch["input_features"] = input_features
+
         return batch
+    
+collate_fn=WhisperDataCollatorWhithPadding()
+
+
 def load_wave(wave_path, sample_rate: int = 16000) -> torch.Tensor:
     waveform, sr = torchaudio.load(wave_path, normalize=True)
     if sample_rate != sr:
@@ -381,13 +469,14 @@ class CustomAudioDataset(Dataset):
 
         with open(csv_file, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
-            next(reader)  # Skip header row if it exists
+            next(reader) 
             for row in reader:
                 audio_path, label = row[0], row[1]
                 self.samples.append((audio_path, label))
 
     def __len__(self):
         return len(self.samples)
+
     def __getitem__(self, idx):
         audio_path, label = self.samples[idx]
         audio_path = f'{self.audio_dir}/{audio_path}'
@@ -405,12 +494,46 @@ class CustomAudioDataset(Dataset):
             'dec_input_features': dec_input_features,
             'labels': labels
         }
+
+dataset = CustomAudioDataset(csv_file, audio_dir, tokenizer)
+
 def train_val_dataset(dataset, val_split=0.001):
     train_idx, val_idx = train_test_split(list(range(len(dataset))), test_size=val_split)
     datasets = {}
     datasets['train'] = Subset(dataset, train_idx)
     datasets['val'] = Subset(dataset, val_idx)
     return datasets
+
+datasets = train_val_dataset(dataset, val_split=0.001)
+
+train_dataset = datasets['train']
+eval_dataset = datasets['val']
+
+def train_dataloader():   
+    dataset = train_dataset
+    return torch.utils.data.DataLoader(
+        dataset,
+        batch_size=2,
+        drop_last=False, 
+        shuffle=False, 
+        num_workers=0,
+        collate_fn=collate_fn
+    )
+
+def eval_dataloader():
+    dataset = eval_dataset
+    return torch.utils.data.DataLoader(
+        dataset,
+        batch_size=2,
+        drop_last=False,
+        shuffle=False,
+        num_workers=0,
+        collate_fn=collate_fn
+    )
+
+metric = evaluate.load("cer")
+wakati = MeCab.Tagger("-Owakati")
+
 def compute_metrics(pred):
     pred_features = pred.predictions
     label_features = pred.label_features
@@ -434,247 +557,139 @@ def compute_metrics(pred):
         for i in range(len(label_str_neo))
         if len(label_str_neo[i]) > 0]
     
-    cer = 100 * metric.compute(predictions=pred_str, references=label_str) # no normalization
-    cer_mecab = 100 * metric.compute(predictions=pred_str_nj, references=label_str_nj) # mecab normalization
+    cer = 100 * metric.compute(predictions=pred_str, references=label_str) 
+    cer_mecab = 100 * metric.compute(predictions=pred_str_nj, references=label_str_nj)
     cer_neo = 100 * metric.compute(predictions=pred_str_neo, references=label_str_neo) # 
-    return {"cer": cer,  "cer_mecab": cer_mecab, "cer_neo": cer_neo}#, "blue": blue, "accuracy": accuracy} 
-def train_with_profiling(model, train_dataloader, eval_dataloader, optimizer, criterion, num_epochs=3, device='cuda', accumulation_steps=4, eval_steps=100, clear_cache=True):
+    return {"cer": cer,  "cer_mecab": cer_mecab, "cer_neo": cer_neo}
+
+
+def train_with_profiling(model, train_dataloader, eval_dataloader, criterion, num_epochs=1, device='cuda', accumulation_steps=2, eval_steps=10, clear_cache=True, checkpoint_dir="D:/proj/models/ckpt", checkpoint_interval=50, max_steps=100, steps_per_speed_update=10):
     model.to(device)
     model.train()
-    
-    metric = evaluate.load("cer")
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
-        with record_function("model_training"):
-            for epoch in range(num_epochs):
-                total_loss = 0
-                optimizer.zero_grad()
-                progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch + 1}/{num_epochs}")
-                for step, batch in enumerate(progress_bar):
+
+    optimizer = Adafactor(
+    model.parameters(), 
+    scale_parameter=True, 
+    relative_step=True, 
+    warmup_init=True, 
+    lr=None
+)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    global_step = 0
+    for epoch in range(num_epochs):
+        total_loss = 0
+        optimizer.zero_grad()
+
+        start_time = time.time()
+        processed_samples_since_last_update = 0
+
+        progress_bar = tqdm(train_dataloader(), desc=f"Epoch {epoch + 1}/{num_epochs}")
+
+        for step, batch in enumerate(progress_bar):
+            if max_steps is not None and global_step >= max_steps:
+                print("Reached max_steps. Stopping training.")
+                return
+
+            global_step += 1
+            batch_size = batch['input_features'].size(0)
+            processed_samples_since_last_update += batch_size
+
+            with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+                with record_function("model_training"):
                     input_features = batch['input_features'].to(device)
                     labels = batch['labels'].long().to(device)
                     dec_input_features = batch['dec_input_features'].to(device)
 
-                    # Forward pass
-                    encoder_outputs = model.encoder(input_features)
-                    decoder_outputs = model.decoder(dec_input_features, encoder_outputs)
+                    with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=True):
+                        encoder_outputs = model.encoder(input_features)
+                        decoder_outputs = model.decoder(dec_input_features, encoder_outputs)
 
-                    logits = decoder_outputs.view(-1, decoder_outputs.size(-1))
-                    loss = criterion(logits, labels.view(-1))
+                        logits = decoder_outputs.view(-1, decoder_outputs.size(-1))
+                        loss = criterion(logits, labels.view(-1))
 
                     total_loss += loss.item()
-                    # Backward pass
                     loss.backward()
 
-                    # Perform optimization step every accumulation_steps
                     if (step + 1) % accumulation_steps == 0:
                         optimizer.step()
                         optimizer.zero_grad()
-
-                        # Optionally clear cache
                         if clear_cache:
                             torch.cuda.empty_cache()
 
-                    # Evaluate metrics every eval_steps
                     if (step + 1) % eval_steps == 0:
                         model.eval()
-                        all_predictions = []
-                        all_labels = []
-                        for eval_batch in eval_dataloader:
-                            eval_input_features = eval_batch['input_features'].to(device)
-                            eval_labels = eval_batch['labels'].long().to(device)
-                            eval_dec_input_features = eval_batch['dec_input_features'].to(device)
+                        with torch.no_grad():
+                            all_predictions = []
+                            all_labels = []
+                            first_batch = True
+                            for eval_batch in eval_dataloader():
+                                if first_batch:
+                                    print(f"First batch: Number of eval samples: {len(eval_batch['input_features'])}")
+                                    first_batch = False
 
-                            with torch.no_grad():
+                                eval_input_features = eval_batch['input_features'].to(device)
+                                eval_labels = eval_batch['labels'].long().to(device)
+                                eval_dec_input_features = eval_batch['dec_input_features'].to(device)
+
                                 encoder_outputs = model.encoder(eval_input_features)
                                 decoder_outputs = model.decoder(eval_dec_input_features, encoder_outputs)
 
-                            all_predictions.append(decoder_outputs)
-                            all_labels.append(eval_labels)
+                                all_predictions.append(decoder_outputs)
+                                all_labels.append(eval_labels)
 
-                        all_predictions = torch.cat([torch.argmax(p, dim=-1) for p in all_predictions], dim=0)
-                        all_labels = torch.cat(all_labels, dim=0)
-                        metrics = compute_metrics({'predictions': all_predictions, 'label_features': all_labels})
-                        print(f"Metrics at step {step + 1}, epoch {epoch + 1}: {metrics}")
-                        model.train()
+                            all_predictions = pad_sequence(all_predictions, batch_first=True, padding_value=-100)
+                            all_predictions = torch.cat([torch.argmax(p, dim=-1) for p in all_predictions], dim=0)
+                            all_labels = torch.cat(all_labels, dim=0) 
 
-                    # Update progress bar
-                    progress_bar.set_postfix(loss=total_loss / (step + 1), iters_per_sec=progress_bar.format_dict["rate"])
+                            metrics = compute_metrics({'predictions': all_predictions, 'label_features': all_labels})
+                            print(f"Metrics at step {step + 1}, epoch {epoch + 1}: {metrics}")
+                        model.train() 
 
-                if (step + 1) % accumulation_steps != 0:
-                    optimizer.step()
-                    optimizer.zero_grad()
+                    if (step + 1) % checkpoint_interval == 0:
+                        checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch+1}_step_{step+1}.pt")
+                        torch.save({
+                            'epoch': epoch + 1,
+                            'step': step + 1,
+                            'model_state_dict': model.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'loss': loss,
+                        }, checkpoint_path)
+                        print(f"Checkpoint saved to {checkpoint_path}")
 
-                print(f'Epoch {epoch + 1}, Loss: {total_loss / len(train_dataloader)}')
+            if (step + 1) % steps_per_speed_update == 0:
+                elapsed_time = time.time() - start_time
+                samples_per_second = processed_samples_since_last_update / elapsed_time if elapsed_time > 0 else 0
+
+                progress_bar.set_postfix(loss=total_loss / (step + 1), global_step=global_step, samples_per_second=f"{samples_per_second:.2f}")
+
+                start_time = time.time()
+                processed_samples_since_last_update = 0
+
+        if (step + 1) % accumulation_steps != 0:
+            optimizer.step()
+            optimizer.zero_grad()
+
+        print(f'Epoch {epoch + 1}, Average Loss: {total_loss / len(train_dataloader)}')
+
     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-if __name__ == "__main__":
-    
-    dimensions = ModelDimensions(
-        n_mels=128, 
-        n_audio_ctx=1500, 
-        n_audio_state=1280, 
-        n_audio_head=20, 
-        n_audio_layer=26, 
-        n_vocab=51866, 
-        n_text_ctx=448, 
-        n_text_state=1280, 
-        n_text_head=16, 
-        n_text_layer=4
-        )
 
-    pretrained_model = WhisperForConditionalGeneration.from_pretrained('openai/whisper-large-v3-turbo')
-    pretrained_state_dict = pretrained_model.state_dict()
-    model = Whisper(dimensions).cuda()
-    model_state_dict = model.state_dict()
+optimizer = optim.Adafactor(model.parameters(), lr=5e-5)
+criterion = torch.nn.CrossEntropyLoss(ignore_index=-100)
 
-    # Transfer convolutional layers
-    transfer_layer('model.encoder.conv1.weight', 'encoder.conv1.weight')
-    transfer_layer('model.encoder.conv1.bias', 'encoder.conv1.bias')
-    transfer_layer('model.encoder.conv2.weight', 'encoder.conv2.weight')
-    transfer_layer('model.encoder.conv2.bias', 'encoder.conv2.bias')
+train_loader = train_dataloader()
+eval_loader = eval_dataloader()
 
-    # Transfer layer norms
-    transfer_layer('model.encoder.layer_norm.weight', 'encoder.ln_post.weight')
-    transfer_layer('model.encoder.layer_norm.bias', 'encoder.ln_post.bias')
-    transfer_layer('model.decoder.layer_norm.weight', 'decoder.ln.weight')
-    transfer_layer('model.decoder.layer_norm.bias', 'decoder.ln.bias')
-
-    # Transfer token embeddings
-    transfer_layer('model.decoder.embed_tokens.weight', 'decoder.token_embedding.weight') # tokenizer
-
-    # Transfer encoder and decoder block layers
-    for i in range(6):
-        transfer_layer(f'model.encoder.layers.{i}.self_attn.k_proj.weight', f'encoder.blocks.{i}.attn.key.weight')
-        transfer_layer(f'model.encoder.layers.{i}.self_attn.v_proj.weight', f'encoder.blocks.{i}.attn.value.weight')
-        transfer_layer(f'model.encoder.layers.{i}.self_attn.q_proj.weight', f'encoder.blocks.{i}.attn.query.weight')
-        transfer_layer(f'model.encoder.layers.{i}.self_attn.out_proj.weight', f'encoder.blocks.{i}.attn.out.weight')
-        transfer_layer(f'model.encoder.layers.{i}.self_attn_layer_norm.weight', f'encoder.blocks.{i}.attn_ln.weight')
-        transfer_layer(f'model.encoder.layers.{i}.self_attn_layer_norm.bias', f'encoder.blocks.{i}.attn_ln.bias')
-        transfer_layer(f'model.encoder.layers.{i}.fc1.weight', f'encoder.blocks.{i}.mlp.0.weight')
-        transfer_layer(f'model.encoder.layers.{i}.fc1.bias', f'encoder.blocks.{i}.mlp.0.bias')
-        transfer_layer(f'model.encoder.layers.{i}.fc2.weight', f'encoder.blocks.{i}.mlp.2.weight')
-        transfer_layer(f'model.encoder.layers.{i}.fc2.bias', f'encoder.blocks.{i}.mlp.2.bias')
-        transfer_layer(f'model.encoder.layers.{i}.final_layer_norm.weight', f'encoder.blocks.{i}.mlp_ln.weight')
-        transfer_layer(f'model.encoder.layers.{i}.final_layer_norm.bias', f'encoder.blocks.{i}.mlp_ln.bias')
-        transfer_layer(f'model.decoder.layers.{i}.self_attn.k_proj.weight', f'decoder.blocks.{i}.attn.key.weight')
-        transfer_layer(f'model.decoder.layers.{i}.self_attn.v_proj.weight', f'decoder.blocks.{i}.attn.value.weight')
-        transfer_layer(f'model.decoder.layers.{i}.self_attn.q_proj.weight', f'decoder.blocks.{i}.attn.query.weight')
-        transfer_layer(f'model.decoder.layers.{i}.self_attn.out_proj.weight', f'decoder.blocks.{i}.attn.out.weight')
-        transfer_layer(f'model.decoder.layers.{i}.self_attn_layer_norm.weight', f'decoder.blocks.{i}.attn_ln.weight')
-        transfer_layer(f'model.decoder.layers.{i}.self_attn_layer_norm.bias', f'decoder.blocks.{i}.attn_ln.bias')
-        transfer_layer(f'model.decoder.layers.{i}.encoder_attn.k_proj.weight', f'decoder.blocks.{i}.cross_attn.key.weight')
-        transfer_layer(f'model.decoder.layers.{i}.encoder_attn.v_proj.weight', f'decoder.blocks.{i}.cross_attn.value.weight')
-        transfer_layer(f'model.decoder.layers.{i}.encoder_attn.q_proj.weight', f'decoder.blocks.{i}.cross_attn.query.weight')
-        transfer_layer(f'model.decoder.layers.{i}.encoder_attn.out_proj.weight', f'decoder.blocks.{i}.cross_attn.out.weight')
-        transfer_layer(f'model.decoder.layers.{i}.encoder_attn_layer_norm.weight', f'decoder.blocks.{i}.cross_attn_ln.weight')
-        transfer_layer(f'model.decoder.layers.{i}.encoder_attn_layer_norm.bias', f'decoder.blocks.{i}.cross_attn_ln.bias')
-        transfer_layer(f'model.decoder.layers.{i}.fc1.weight', f'decoder.blocks.{i}.mlp.0.weight')
-        transfer_layer(f'model.decoder.layers.{i}.fc1.bias', f'decoder.blocks.{i}.mlp.0.bias')
-        transfer_layer(f'model.decoder.layers.{i}.fc2.weight', f'decoder.blocks.{i}.mlp.2.weight')
-        transfer_layer(f'model.decoder.layers.{i}.fc2.bias', f'decoder.blocks.{i}.mlp.2.bias')
-        transfer_layer(f'model.decoder.layers.{i}.final_layer_norm.weight', f'decoder.blocks.{i}.mlp_ln.weight')
-        transfer_layer(f'model.decoder.layers.{i}.final_layer_norm.bias', f'decoder.blocks.{i}.mlp_ln.bias')
-
-    model.load_state_dict(model_state_dict)
-
-    tokenizer = WhisperTokenizer.from_pretrained('openai/whisper-medium')
-    csv_file = 'D:/proj/datasets/gvj/trimmed/metadata.csv'
-    audio_dir = 'D:/proj/datasets/gvj/trimmed/'
-
-    # Create the data collator instance
-    collate_fn = WhisperDataCollatorWithPadding(tokenizer=tokenizer)
-    dataset = CustomAudioDataset(csv_file, audio_dir, tokenizer)
-
-    datasets = train_val_dataset(dataset, val_split=0.001)
-    train_dataset = datasets['train']
-    eval_dataset = datasets['val']
-
-    metric = evaluate.load("cer")
-    wakati = MeCab.Tagger("-Owakati")
-    optimizer = Adafactor(
-        model.parameters(), 
-        scale_parameter=True, 
-        relative_step=True, 
-        warmup_init=True, 
-        lr=None
-    )
+train_with_profiling(model, train_dataloader, eval_dataloader, criterion, num_epochs=1, device='cuda', accumulation_steps=2, eval_steps=10, clear_cache=True, checkpoint_dir="D:/proj/models/ckpt", checkpoint_interval=50, max_steps=100, steps_per_speed_update=10)
 
 
 
-    # Initialize optimizer and loss function
-    optimizer = optim.Adafactor(model.parameters(), lr=5e-5)
-    criterion = torch.nn.CrossEntropyLoss(ignore_index=-100)
-
-
-    def main():
-        multiprocessing.set_start_method('spawn', force=True)  # Add this line
-        train_loader = train_dataloader(train_dataset, collate_fn)
-        eval_loader = eval_dataloader(eval_dataset, collate_fn)
-        train_with_profiling(model, train_loader, eval_loader, optimizer, criterion, num_epochs=3, device='cuda', accumulation_steps=4, eval_steps=100, clear_cache=True)
-    main()
-
-
-# # Initialize Adafactor optimizer
-# optimizer = Adafactor(
-#     model.parameters(), 
-#     scale_parameter=True, 
-#     relative_step=True, 
-#     warmup_init=True, 
-#     lr=None
-# )
-
-# def train_combined(model, dataloader, optimizer, criterion, num_epochs=3, device='cuda', accumulation_steps=4):
-#     model.to(device)
-#     model.train()
-#     scaler = GradScaler()
-
-#     with profiler.profile(activities=[profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.CUDA], record_shapes=True) as prof:
-#         with profiler.record_function("model_training"):
-#             for epoch in range(num_epochs):
-#                 total_loss = 0
-#                 optimizer.zero_grad()
-#                 progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{num_epochs}")
-#                 for i, batch in enumerate(progress_bar):
-#                     input_features = batch['input_features'].to(device)
-#                     labels = batch['labels'].long().to(device)
-#                     dec_input_features = batch['dec_input_features'].to(device)
-
-#                     with autocast(device_type='cuda'):
-#                         # Forward pass
-#                         encoder_outputs = model.encoder(input_features)
-#                         decoder_outputs = model.decoder(dec_input_features, encoder_outputs)
-
-#                         logits = decoder_outputs.view(-1, decoder_outputs.size(-1))
-#                         loss = criterion(logits, labels.view(-1))
-
-#                     total_loss += loss.item()
-
-#                     # Backward pass
-#                     scaler.scale(loss).backward()
-
-#                     # Perform optimization step every accumulation_steps
-#                     if (i + 1) % accumulation_steps == 0:
-#                         scaler.step(optimizer)
-#                         scaler.update()
-#                         optimizer.zero_grad()
-
-#                     # Update progress bar
-#                     progress_bar.set_postfix(loss=total_loss / (i + 1), iters_per_sec=progress_bar.format_dict["rate"])
-
-#                 if (i + 1) % accumulation_steps != 0:
-#                     scaler.step(optimizer)
-#                     scaler.update()
-#                     optimizer.zero_grad()
-
-#                 print(f'Epoch {epoch + 1}, Loss: {total_loss / len(dataloader)}')
-
-#     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-
-# # Initialize optimizer and loss function
-# optimizer = optim.Adafactor(model.parameters(), lr=5e-5)
-# criterion = nn.CrossEntropyLoss(ignore_index=-100)
-
-# # Train the model with all combined features
-# train_combined(model, dataloader, optimizer, criterion, num_epochs=3, device='cuda', accumulation_steps=4)
-
+checkpoint_path = "D:/proj/models/ckpt/checkpoint_epoch_x_step_x.pt"
+checkpoint = torch.load(checkpoint_path)
+model.load_state_dict(checkpoint['model_state_dict'])
+optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+start_epoch = checkpoint['epoch']
+start_step = checkpoint['step']
+loss = checkpoint['loss']
 
 
