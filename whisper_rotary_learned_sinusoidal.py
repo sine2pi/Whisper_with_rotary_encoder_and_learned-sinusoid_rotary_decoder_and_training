@@ -351,10 +351,7 @@ dimensions = ModelDimensions(
     n_text_layer=4
     )
 
-model = Whisper(dimensions).cuda()
-
-
-pretrained_model = WhisperForConditionalGeneration.from_pretrained('openai/whisper-large-v3-turbo')
+pretrained_model = whisper.load_model("small")
 pretrained_state_dict = pretrained_model.state_dict()
 
 model = Whisper(dimensions).cuda()
@@ -368,96 +365,43 @@ def transfer_layer(src_name, tgt_name):
         print(f'Source shape: {src_tensor.shape}, Target shape: {tgt_tensor.shape}')
         tgt_tensor.copy_(src_tensor)
 
+# Transfer convolutional layers
 transfer_layer('model.encoder.conv1.weight', 'encoder.conv1.weight')
 transfer_layer('model.encoder.conv1.bias', 'encoder.conv1.bias')
 transfer_layer('model.encoder.conv2.weight', 'encoder.conv2.weight')
 transfer_layer('model.encoder.conv2.bias', 'encoder.conv2.bias')
 
-# transfer_layer('model.encoder.embed_positions.weight', 'encoder.positional_embedding.weight')
-# transfer_layer('model.decoder.embed_positions.weight', 'decoder.positional_embedding.weight')
+# Transfer layer norms (skip custom LayerNorm)
+# transfer_layer('model.encoder.layer_norm.weight', 'encoder.ln_post.weight')
+# transfer_layer('model.encoder.layer_norm.bias', 'encoder.ln_post.bias')
+# transfer_layer('model.decoder.layer_norm.weight', 'decoder.ln.weight')
+# transfer_layer('model.decoder.layer_norm.bias', 'decoder.ln.bias')
 
-transfer_layer('model.encoder.layer_norm.weight', 'encoder.ln_post.weight')
-transfer_layer('model.encoder.layer_norm.bias', 'encoder.ln_post.bias')
-transfer_layer('model.decoder.layer_norm.weight', 'decoder.ln.weight')
-transfer_layer('model.decoder.layer_norm.bias', 'decoder.ln.bias')
-
-transfer_layer('model.decoder.embed_tokens.weight', 'decoder.token_embedding.weight') 
-
-for i in range(6):
-    transfer_layer(f'model.encoder.layers.{i}.self_attn.k_proj.weight', f'encoder.blocks.{i}.attn.key.weight')
-    transfer_layer(f'model.encoder.layers.{i}.self_attn.v_proj.weight', f'encoder.blocks.{i}.attn.value.weight')
-    transfer_layer(f'model.encoder.layers.{i}.self_attn.q_proj.weight', f'encoder.blocks.{i}.attn.query.weight')
-    transfer_layer(f'model.encoder.layers.{i}.self_attn.out_proj.weight', f'encoder.blocks.{i}.attn.out.weight')
-    transfer_layer(f'model.encoder.layers.{i}.self_attn_layer_norm.weight', f'encoder.blocks.{i}.attn_ln.weight')
-    transfer_layer(f'model.encoder.layers.{i}.self_attn_layer_norm.bias', f'encoder.blocks.{i}.attn_ln.bias')
-    transfer_layer(f'model.encoder.layers.{i}.fc1.weight', f'encoder.blocks.{i}.mlp.0.weight')
-    transfer_layer(f'model.encoder.layers.{i}.fc1.bias', f'encoder.blocks.{i}.mlp.0.bias')
-    transfer_layer(f'model.encoder.layers.{i}.fc2.weight', f'encoder.blocks.{i}.mlp.2.weight')
-    transfer_layer(f'model.encoder.layers.{i}.fc2.bias', f'encoder.blocks.{i}.mlp.2.bias')
-    transfer_layer(f'model.encoder.layers.{i}.final_layer_norm.weight', f'encoder.blocks.{i}.mlp_ln.weight')
-    transfer_layer(f'model.encoder.layers.{i}.final_layer_norm.bias', f'encoder.blocks.{i}.mlp_ln.bias')
-    transfer_layer(f'model.decoder.layers.{i}.self_attn.k_proj.weight', f'decoder.blocks.{i}.attn.key.weight')
-    transfer_layer(f'model.decoder.layers.{i}.self_attn.v_proj.weight', f'decoder.blocks.{i}.attn.value.weight')
-    transfer_layer(f'model.decoder.layers.{i}.self_attn.q_proj.weight', f'decoder.blocks.{i}.attn.query.weight')
-    transfer_layer(f'model.decoder.layers.{i}.self_attn.out_proj.weight', f'decoder.blocks.{i}.attn.out.weight')
-    transfer_layer(f'model.decoder.layers.{i}.self_attn_layer_norm.weight', f'decoder.blocks.{i}.attn_ln.weight')
-    transfer_layer(f'model.decoder.layers.{i}.self_attn_layer_norm.bias', f'decoder.blocks.{i}.attn_ln.bias')
-    transfer_layer(f'model.decoder.layers.{i}.encoder_attn.k_proj.weight', f'decoder.blocks.{i}.cross_attn.key.weight')
-    transfer_layer(f'model.decoder.layers.{i}.encoder_attn.v_proj.weight', f'decoder.blocks.{i}.cross_attn.value.weight')
-    transfer_layer(f'model.decoder.layers.{i}.encoder_attn.q_proj.weight', f'decoder.blocks.{i}.cross_attn.query.weight')
-    transfer_layer(f'model.decoder.layers.{i}.encoder_attn.out_proj.weight', f'decoder.blocks.{i}.cross_attn.out.weight')
-    transfer_layer(f'model.decoder.layers.{i}.encoder_attn_layer_norm.weight', f'decoder.blocks.{i}.cross_attn_ln.weight')
-    transfer_layer(f'model.decoder.layers.{i}.encoder_attn_layer_norm.bias', f'decoder.blocks.{i}.cross_attn_ln.bias')
-    transfer_layer(f'model.decoder.layers.{i}.fc1.weight', f'decoder.blocks.{i}.mlp.0.weight')
-    transfer_layer(f'model.decoder.layers.{i}.fc1.bias', f'decoder.blocks.{i}.mlp.0.bias')
-    transfer_layer(f'model.decoder.layers.{i}.fc2.weight', f'decoder.blocks.{i}.mlp.2.weight')
-    transfer_layer(f'model.decoder.layers.{i}.fc2.bias', f'decoder.blocks.{i}.mlp.2.bias')
-    transfer_layer(f'model.decoder.layers.{i}.final_layer_norm.weight', f'decoder.blocks.{i}.mlp_ln.weight')
-    transfer_layer(f'model.decoder.layers.{i}.final_layer_norm.bias', f'decoder.blocks.{i}.mlp_ln.bias')
-
-model.load_state_dict(model_state_dict)
-
-
-
-tokenizer = WhisperTokenizer.from_pretrained('openai/whisper-medium')
-csv_file = 'D:/proj/datasets/gvj/trimmed/metadata.csv'
-audio_dir = 'D:/proj/datasets/gvj/trimmed/'
-
-
-class WhisperDataCollatorWhithPadding:
-    def __call__(sefl, features):
-        input_features, labels, dec_input_features = [], [], []
-        for f in features:
-            input_features.append(f["input_features"])
-            labels.append(f["labels"])
-            dec_input_features.append(f["dec_input_features"])
-
-        input_features = torch.concat([input_id[None, :] for input_id in input_features])
-
-        label_lengths = [len(lab) for lab in labels]
-        dec_input_features_length = [len(e) for e in dec_input_features]
-        max_label_len = max(label_lengths+dec_input_features_length)
-
-        labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) for lab, lab_len in zip(labels, label_lengths)]
-        dec_input_features = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) for e, e_len in zip(dec_input_features, dec_input_features_length)] # 50257 is eot token id
-
-        batch = {
-            "labels": labels,
-            "dec_input_features": dec_input_features
-        }
-
-        batch = {k: torch.tensor(np.array(v), requires_grad=False) for k, v in batch.items()}
-        batch["input_features"] = input_features
-
-        return batch
+# Transfer multi-head attention layers (skip custom layers)
+for i in range(12):  # Adjust according to actual layer count
+    transfer_layer(f'model.encoder.blocks.{i}.attn.query.weight', f'encoder.blocks.{i}.query.weight')
+    transfer_layer(f'model.encoder.blocks.{i}.attn.query.bias', f'encoder.blocks.{i}.query.bias')
+    transfer_layer(f'model.encoder.blocks.{i}.attn.key.weight', f'encoder.blocks.{i}.key.weight')
+    transfer_layer(f'model.encoder.blocks.{i}.attn.value.weight', f'encoder.blocks.{i}.value.weight')
+    transfer_layer(f'model.encoder.blocks.{i}.attn.out.weight', f'encoder.blocks.{i}.out.weight')
+    transfer_layer(f'model.encoder.blocks.{i}.attn.out.bias', f'encoder.blocks.{i}.out.bias')
+    transfer_layer(f'model.decoder.blocks.{i}.attn.query.weight', f'decoder.blocks.{i}.query.weight')
+    transfer_layer(f'model.decoder.blocks.{i}.attn.query.bias', f'decoder.blocks.{i}.query.bias')
+    transfer_layer(f'model.decoder.blocks.{i}.attn.key.weight', f'decoder.blocks.{i}.key.weight')
+    transfer_layer(f'model.decoder.blocks.{i}.attn.value.weight', f'decoder.blocks.{i}.value.weight')
+    transfer_layer(f'model.decoder.blocks.{i}.attn.out.weight', f'decoder.blocks.{i}.out.weight')
+    transfer_layer(f'model.decoder.blocks.{i}.attn.out.bias', f'decoder.blocks.{i}.out.bias')
     
-collate_fn=WhisperDataCollatorWhithPadding()
-
+# Load the modified state dict into the new model
+model.load_state_dict(model_state_dict)
+tokenizer = WhisperTokenizerFast.from_pretrained("D:/proj/models/new_whisper_medium", task="transcribe", language="japanese", local_files_only=True)
+csv_file = 'D:/proj/datasets/gv_test/metadata.csv'
+audio_dir = 'D:/proj/datasets/gv_test/'
 
 def load_wave(wave_path, sample_rate: int = 16000) -> torch.Tensor:
     waveform, sr = torchaudio.load(wave_path, normalize=True)
     if sample_rate != sr:
-        waveform = at.Resample(sr, sample_rate)(waveform)
+        waveform = torchaudio.transforms.Resample(sr, sample_rate)(waveform)
     return waveform
 
 class CustomAudioDataset(Dataset):
@@ -469,7 +413,7 @@ class CustomAudioDataset(Dataset):
 
         with open(csv_file, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
-            next(reader) 
+            next(reader)  # Skip header row if it exists
             for row in reader:
                 audio_path, label = row[0], row[1]
                 self.samples.append((audio_path, label))
@@ -483,7 +427,7 @@ class CustomAudioDataset(Dataset):
 
         audio = load_wave(audio_path, sample_rate=self.sample_rate)
         audio = whisper.pad_or_trim(audio.flatten())
-        input_features = whisper.log_mel_spectrogram(audio, n_mels=128)
+        input_features = whisper.log_mel_spectrogram(audio, n_mels=80)
 
         label_tokens = [self.tokenizer.bos_token_id] + self.tokenizer.encode(label) + [self.tokenizer.eos_token_id]
         dec_input_features = label_tokens[:-1]
@@ -505,183 +449,226 @@ def train_val_dataset(dataset, val_split=0.001):
     return datasets
 
 datasets = train_val_dataset(dataset, val_split=0.001)
-
 train_dataset = datasets['train']
 eval_dataset = datasets['val']
 
+def collate_fn(batch):
+    input_features, labels, dec_input_features = [], [], []
+    for f in batch:
+        input_features.append(f["input_features"])
+        labels.append(f["labels"])
+        dec_input_features.append(f["dec_input_features"])
+
+    input_features = torch.stack(input_features)
+
+    max_label_len = max(len(l) for l in labels)
+    max_dec_input_len = max(len(d) for d in dec_input_features)
+    max_len = max(max_label_len, max_dec_input_len)
+
+    labels = [np.pad(l, (0, max_len - len(l)), 'constant', constant_values=-100) for l in labels]
+    dec_input_features = [np.pad(d, (0, max_len - len(d)), 'constant', constant_values=tokenizer.pad_token_id) for d in dec_input_features]
+
+    # Convert the lists of numpy arrays to numpy arrays before creating tensors
+    labels = np.array(labels)
+    dec_input_features = np.array(dec_input_features)
+
+    labels = torch.tensor(labels, dtype=torch.long)
+    dec_input_features = torch.tensor(dec_input_features, dtype=torch.long)
+
+    batch = {
+        "input_features": input_features,
+        "labels": labels,
+        "dec_input_features": dec_input_features
+    }
+    return batch
+
+metrics_cer = evaluate.load("cer")
+metrics_wer = evaluate.load("wer")
+
+def compute_metrics(pred):
+    pred_ids = pred["predictions"]
+    label_ids = pred["label_ids"]
+    label_ids[label_ids == -100] = tokenizer.pad_token_id
+    pred_str = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
+    label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
+
+    cer = 100 * metrics_cer.compute(predictions=pred_str, references=label_str)
+    wer = 100 * metrics_wer.compute(predictions=pred_str, references=label_str)
+    return {"cer": cer, "wer": wer}
+
+# Functions to create DataLoaders
 def train_dataloader():   
-    dataset = train_dataset
-    return torch.utils.data.DataLoader(
-        dataset,
-        batch_size=2,
+    return DataLoader(
+        train_dataset,
+        batch_size=1,  # Adjust batch size as needed
         drop_last=False, 
-        shuffle=False, 
+        shuffle=True, 
         num_workers=0,
         collate_fn=collate_fn
     )
 
 def eval_dataloader():
-    dataset = eval_dataset
-    return torch.utils.data.DataLoader(
-        dataset,
-        batch_size=2,
+    return DataLoader(
+        eval_dataset,
+        batch_size=1,  # Adjust batch size as needed
         drop_last=False,
         shuffle=False,
         num_workers=0,
         collate_fn=collate_fn
     )
-
-metric = evaluate.load("cer")
-wakati = MeCab.Tagger("-Owakati")
-
-def compute_metrics(pred):
-    pred_features = pred.predictions
-    label_features = pred.label_features
-    label_features[label_features == -100] = tokenizer.pad_token_id
-    pred_str = tokenizer.batch_decode(pred_features, skip_special_tokens=True)
-    label_str = tokenizer.batch_decode(label_features, skip_special_tokens=True)
     
-    pred_str_nj = [wakati.parse(pred) for pred in pred_str] 
-    label_str_nj = [wakati.parse(label) for label in label_str] 
-    pred_str_nj = [pred_str_nj[i] for i in range(len(pred_str_nj)) if len(label_str_nj[i]) > 0]
-    label_str_nj = [
-        label_str_nj[i]
-        for i in range(len(label_str_nj))
-        if len(label_str_nj[i]) > 0]
-    
-    pred_str_neo = [neologdn.normalize(pred) for pred in pred_str] 
-    label_str_neo = [neologdn.normalize(label) for label in label_str] 
-    pred_str_neo = [pred_str_neo[i] for i in range(len(pred_str_neo)) if len(label_str_neo[i]) > 0]
-    label_str_neo = [
-        label_str_neo[i]
-        for i in range(len(label_str_neo))
-        if len(label_str_neo[i]) > 0]
-    
-    cer = 100 * metric.compute(predictions=pred_str, references=label_str) 
-    cer_mecab = 100 * metric.compute(predictions=pred_str_nj, references=label_str_nj)
-    cer_neo = 100 * metric.compute(predictions=pred_str_neo, references=label_str_neo) # 
-    return {"cer": cer,  "cer_mecab": cer_mecab, "cer_neo": cer_neo}
+import logging
+import os
+from torch.utils.tensorboard import SummaryWriter
 
+checkpoint_dir = 'D:/proj/models/ckpt/'
+os.makedirs(checkpoint_dir, exist_ok=True)
+log_dir = 'D:/proj/models/ckpt/logs/'
+os.makedirs(log_dir, exist_ok=True)
 
-def train_with_profiling(model, train_dataloader, eval_dataloader, criterion, num_epochs=1, device='cuda', accumulation_steps=2, eval_steps=10, clear_cache=True, checkpoint_dir="D:/proj/models/ckpt", checkpoint_interval=50, max_steps=100, steps_per_speed_update=10):
+# Create a SummaryWriter for TensorBoard, saving logs to the specified directory
+writer = SummaryWriter(log_dir)
+
+# Set up logging to a file
+logging.basicConfig(
+    filename=os.path.join(log_dir, 'training.log'), 
+    filemode='w', 
+    format='%(asctime)s - %(levelname)s - %(message)s', 
+    level=logging.INFO
+)
+
+# Verify the dataset
+print(f"Number of samples in dataset: {len(dataset)}")
+for i in range(min(3, len(dataset))):  # Print first few samples for verification
+    print(f"Sample {i}: {dataset[i]}")
+
+def train_and_evaluate(model, train_loader, eval_loader, optimizer, loss_fn, num_epochs=1, device='cuda', accumulation_steps=1, clear_cache=True, log_interval=5, eval_interval=100, save_interval=100, checkpoint_dir=checkpoint_dir, log_dir=log_dir):
     model.to(device)
-    model.train()
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    global_step = 0
 
-    optimizer = Adafactor(
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0
+        optimizer.zero_grad()
+        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}")
+
+        for step, batch in enumerate(progress_bar):
+            input_features = batch['input_features'].to(device)
+            labels = batch['labels'].long().to(device)
+            dec_input_features = batch['dec_input_features'].to(device)
+
+            # Forward pass
+            encoder_outputs = model.encoder(input_features)
+            decoder_outputs = model.decoder(dec_input_features, encoder_outputs)
+
+            logits = decoder_outputs.view(-1, decoder_outputs.size(-1))
+            loss = loss_fn(logits, labels.view(-1))
+
+            total_loss += loss.item()
+
+            # Backward pass
+            loss.backward()
+
+            # Perform optimization step every accumulation_steps
+            if (step + 1) % accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+
+                # Optionally clear cache
+                if clear_cache:
+                    torch.cuda.empty_cache()
+
+            global_step += 1
+
+            # Logging at specified intervals
+            if global_step % log_interval == 0:
+                writer.add_scalar('Loss/train', total_loss / (step + 1), global_step)
+                logging.info(f"Step {global_step}, Loss: {total_loss / (step + 1)}")
+
+            # Evaluate at specified intervals
+            if global_step % eval_interval == 0:
+                model.eval()
+                eval_loss = 0
+                all_predictions = []
+                all_labels = []
+                with torch.no_grad():
+                    for eval_batch in eval_loader:
+                        input_features = eval_batch['input_features'].to(device)
+                        labels = eval_batch['labels'].long().to(device)
+                        dec_input_features = eval_batch['dec_input_features'].to(device)
+
+                        encoder_outputs = model.encoder(input_features)
+                        decoder_outputs = model.decoder(dec_input_features, encoder_outputs)
+
+                        # Compute loss
+                        logits = decoder_outputs.view(-1, decoder_outputs.size(-1))
+                        loss = loss_fn(logits, labels.view(-1))
+                        eval_loss += loss.item()
+
+                        all_predictions.append(torch.argmax(decoder_outputs, dim=-1).cpu().numpy())
+                        all_labels.append(labels.cpu().numpy())
+
+                # Flatten the lists of lists into a single list for decoding
+                all_predictions = [item for sublist in all_predictions for item in sublist]
+                all_labels = [item for sublist in all_labels for item in sublist]
+
+                # Prepare for metric computation
+                predictions = {
+                    "predictions": np.array(all_predictions),
+                    "label_ids": np.array(all_labels)
+                }
+
+                # Compute metrics
+                metrics = compute_metrics(predictions)
+                writer.add_scalar('Loss/eval', eval_loss / len(eval_loader), global_step)
+                writer.add_scalar('CER', metrics['cer'], global_step)
+                writer.add_scalar('WER', metrics['wer'], global_step)
+                print(f"Step {global_step}, Eval Loss: {eval_loss / len(eval_loader)}, CER: {metrics['cer']}, WER: {metrics['wer']}")
+                logging.info(f"Step {global_step}, Eval Loss: {eval_loss / len(eval_loader)}, CER: {metrics['cer']}, WER: {metrics['wer']}")
+
+                # Print sample predictions and labels for verification
+                sample_indices = range(min(3, len(all_predictions)))  # Print up to 3 sample predictions
+                for idx in sample_indices:
+                    pred_str = tokenizer.decode(all_predictions[idx], skip_special_tokens=True)
+                    label_str = tokenizer.decode(all_labels[idx], skip_special_tokens=True)
+                    print(f"Sample {idx}: Prediction: {pred_str}, Label: {label_str}")
+                    logging.info(f"Sample {idx}: Prediction: {pred_str}, Label: {label_str}")
+                
+                model.train()
+
+            # Save model at specified intervals
+            if global_step % save_interval == 0:
+                checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_step_{global_step}.pt')
+                torch.save(model.state_dict(), checkpoint_path)
+                print(f"Model saved at step {global_step} to {checkpoint_path}")
+                logging.info(f"Model saved at step {global_step} to {checkpoint_path}")
+
+        print(f'Epoch {epoch + 1}, Loss: {total_loss / len(train_loader)}')
+        logging.info(f'Epoch {epoch + 1}, Loss: {total_loss / len(train_loader)}')
+
+    # Save final model
+    final_model_path = os.path.join(checkpoint_dir, 'final_model.pt')
+    torch.save(model.state_dict(), final_model_path)
+    print(f"Final model saved to {final_model_path}")
+    logging.info(f"Final model saved to {final_model_path}")
+
+optimizer = Adafactor(
     model.parameters(), 
     scale_parameter=True, 
     relative_step=True, 
     warmup_init=True, 
     lr=None
 )
-    os.makedirs(checkpoint_dir, exist_ok=True)
 
-    global_step = 0
-    for epoch in range(num_epochs):
-        total_loss = 0
-        optimizer.zero_grad()
+loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
 
-        start_time = time.time()
-        processed_samples_since_last_update = 0
-
-        progress_bar = tqdm(train_dataloader(), desc=f"Epoch {epoch + 1}/{num_epochs}")
-
-        for step, batch in enumerate(progress_bar):
-            if max_steps is not None and global_step >= max_steps:
-                print("Reached max_steps. Stopping training.")
-                return
-
-            global_step += 1
-            batch_size = batch['input_features'].size(0)
-            processed_samples_since_last_update += batch_size
-
-            with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
-                with record_function("model_training"):
-                    input_features = batch['input_features'].to(device)
-                    labels = batch['labels'].long().to(device)
-                    dec_input_features = batch['dec_input_features'].to(device)
-
-                    with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=True):
-                        encoder_outputs = model.encoder(input_features)
-                        decoder_outputs = model.decoder(dec_input_features, encoder_outputs)
-
-                        logits = decoder_outputs.view(-1, decoder_outputs.size(-1))
-                        loss = criterion(logits, labels.view(-1))
-
-                    total_loss += loss.item()
-                    loss.backward()
-
-                    if (step + 1) % accumulation_steps == 0:
-                        optimizer.step()
-                        optimizer.zero_grad()
-                        if clear_cache:
-                            torch.cuda.empty_cache()
-
-                    if (step + 1) % eval_steps == 0:
-                        model.eval()
-                        with torch.no_grad():
-                            all_predictions = []
-                            all_labels = []
-                            first_batch = True
-                            for eval_batch in eval_dataloader():
-                                if first_batch:
-                                    print(f"First batch: Number of eval samples: {len(eval_batch['input_features'])}")
-                                    first_batch = False
-
-                                eval_input_features = eval_batch['input_features'].to(device)
-                                eval_labels = eval_batch['labels'].long().to(device)
-                                eval_dec_input_features = eval_batch['dec_input_features'].to(device)
-
-                                encoder_outputs = model.encoder(eval_input_features)
-                                decoder_outputs = model.decoder(eval_dec_input_features, encoder_outputs)
-
-                                all_predictions.append(decoder_outputs)
-                                all_labels.append(eval_labels)
-
-                            all_predictions = pad_sequence(all_predictions, batch_first=True, padding_value=-100)
-                            all_predictions = torch.cat([torch.argmax(p, dim=-1) for p in all_predictions], dim=0)
-                            all_labels = torch.cat(all_labels, dim=0) 
-
-                            metrics = compute_metrics({'predictions': all_predictions, 'label_features': all_labels})
-                            print(f"Metrics at step {step + 1}, epoch {epoch + 1}: {metrics}")
-                        model.train() 
-
-                    if (step + 1) % checkpoint_interval == 0:
-                        checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch+1}_step_{step+1}.pt")
-                        torch.save({
-                            'epoch': epoch + 1,
-                            'step': step + 1,
-                            'model_state_dict': model.state_dict(),
-                            'optimizer_state_dict': optimizer.state_dict(),
-                            'loss': loss,
-                        }, checkpoint_path)
-                        print(f"Checkpoint saved to {checkpoint_path}")
-
-            if (step + 1) % steps_per_speed_update == 0:
-                elapsed_time = time.time() - start_time
-                samples_per_second = processed_samples_since_last_update / elapsed_time if elapsed_time > 0 else 0
-
-                progress_bar.set_postfix(loss=total_loss / (step + 1), global_step=global_step, samples_per_second=f"{samples_per_second:.2f}")
-
-                start_time = time.time()
-                processed_samples_since_last_update = 0
-
-        if (step + 1) % accumulation_steps != 0:
-            optimizer.step()
-            optimizer.zero_grad()
-
-        print(f'Epoch {epoch + 1}, Average Loss: {total_loss / len(train_dataloader)}')
-
-    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-
-optimizer = optim.Adafactor(model.parameters(), lr=5e-5)
-criterion = torch.nn.CrossEntropyLoss(ignore_index=-100)
-
+# Create DataLoaders
 train_loader = train_dataloader()
 eval_loader = eval_dataloader()
 
-train_with_profiling(model, train_dataloader, eval_dataloader, criterion, num_epochs=1, device='cuda', accumulation_steps=2, eval_steps=10, clear_cache=True, checkpoint_dir="D:/proj/models/ckpt", checkpoint_interval=50, max_steps=100, steps_per_speed_update=10)
-
+# Train and evaluate the model with logging, evaluation, model saving, and debugging
+train_and_evaluate(model, train_loader, eval_loader, optimizer, loss_fn, num_epochs=1, device='cuda', accumulation_steps=1, clear_cache=True, log_interval=5, eval_interval=10, save_interval=100, checkpoint_dir=checkpoint_dir, log_dir=log_dir)
 
 
 checkpoint_path = "D:/proj/models/ckpt/checkpoint_epoch_x_step_x.pt"
