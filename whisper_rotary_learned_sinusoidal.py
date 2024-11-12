@@ -1,43 +1,29 @@
-## Whisper with rotary encoder and learned-sinusoid rotary decoder
 
-# import multiprocessing
+import torch.optim as optim
+import torch.optim.lr_scheduler as lr_scheduler
+import logging
+from torch.utils.tensorboard import SummaryWriter
+from torch.cuda.amp import autocast, GradScaler
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader, Subset
+from sklearn.model_selection import train_test_split
+import torchaudio, csv, whisper
+import numpy as np
+from tqdm import tqdm
+from transformers import WhisperTokenizerFast, WhisperForConditionalGeneration
 from torch.profiler import profile, record_function, ProfilerActivity
 from torch.nn.utils.rnn import pad_sequence
 import torchaudio.transforms as at
 from torch.utils.data import Dataset
-#from data_loader import eval_dataloader, train_dataloader
 import torch.utils.data as Data
-import base64, csv, torchaudio, neologdn, evaluate, MeCab, gzip, numpy as np, torch.nn.functional as F, torch, whisper
+import base64, csv, torchaudio, neologdn, evaluate, MeCab, gzip, numpy as np, torch.nn.functional as F, whisper, torch, os, time, evaluate
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional, Tuple
-from transformers import TrainingArguments, WhisperTokenizer
-from datasets import load_dataset, load_from_disk
-from torch.utils.data import Subset
-from sklearn.model_selection import train_test_split
 from torch import Tensor, nn
 from rotary_embedding_torch import RotaryEmbedding
-from transformers import Trainer, WhisperFeatureExtractor, WhisperTokenizerFast
-from torch.utils.data import Dataset, DataLoader
-from torch import Tensor, nn
-from whisper import load_audio, log_mel_spectrogram, pad_or_trim
-from typing import Any, Dict, List, Union
-from torchaudio import datasets
-from tqdm import tqdm
-from torch.optim import AdamW, lr_scheduler
-from torch import optim
-import torch.utils.checkpoint as checkpoint
-from decoding import decode as decode_function
-from decoding import detect_language as detect_language_function
-from transcribe import transcribe as transcribe_function
-from transformers import Adafactor
-from tqdm import tqdm
-import torch, os, time
-import torch.optim as optim
-import torch.nn as nn
-from torch.amp import autocast, GradScaler
-import torch.profiler as profiler
-
+from torch.nn import functional as F
+from torch.nn.utils.rnn import pad_sequence
 try:
     from torch.nn.functional import scaled_dot_product_attention
 
@@ -46,10 +32,9 @@ except (ImportError, RuntimeError, OSError):
     scaled_dot_product_attention = None
     SDPA_AVAILABLE = False
 
-import torch
-from transformers import WhisperForConditionalGeneration
-
-
+from decoding import decode as decode_function
+from decoding import detect_language as detect_language_function
+from transcribe import transcribe as transcribe_function
 
 @dataclass
 class ModelDimensions:
@@ -201,10 +186,8 @@ class AudioEncoder(nn.Module):
         x = F.gelu(self.conv1(x))
         x = F.gelu(self.conv2(x))
         x = x.permute(0, 2, 1)
-
         for block in self.blocks:
-            x = checkpoint.checkpoint(block, x)
-        
+            x = block(x)
         x = self.ln_post(x)
         return x
 
@@ -236,20 +219,17 @@ class TextDecoder(nn.Module):
         for block in self.blocks:
             x = block(x, xa, mask=self.mask, kv_cache=kv_cache)
 
-        # for block in self.blocks:
-        #     x = checkpoint.checkpoint(block_forward, block, x, xa, self.mask, kv_cache)
-
         x = self.ln(x)
         logits = (x @ torch.transpose(self.token_embedding.weight.to(x.dtype), 0, 1)).float()
         return logits
-
-   
+    
 class LearnedSinusoidalEmbeddings(nn.Module): # sinusofeatures(n_ctx, n_state)
     def __init__(self, n_ctx, n_state):
         super().__init__()
         self.n_ctx = n_ctx
         self.n_state = n_state
 
+        # Initialize with sinusoidal embeddings
         sinusoidal_embeddings = sinusofeatures(n_ctx, n_state)
         self.positional_embeddings = nn.Parameter(sinusoidal_embeddings)
 
@@ -339,19 +319,21 @@ class Whisper(nn.Module):
     decode = decode_function
 
 dimensions = ModelDimensions(
-    n_mels=128, 
+    n_mels=80, 
     n_audio_ctx=1500, 
-    n_audio_state=1280, 
-    n_audio_head=20, 
+    n_audio_state=1024, 
+    n_audio_head=16, 
     n_audio_layer=24, 
-    n_vocab=51866, 
+    n_vocab=51865, 
     n_text_ctx=448, 
-    n_text_state=1280, 
+    n_text_state=1024, 
     n_text_head=16, 
-    n_text_layer=4
+    n_text_layer=24
     )
 
-pretrained_model = whisper.load_model("small")
+# model = Whisper(dimensions).cuda()
+
+pretrained_model = whisper.load_model("medium")
 pretrained_state_dict = pretrained_model.state_dict()
 
 model = Whisper(dimensions).cuda()
@@ -394,15 +376,22 @@ for i in range(12):  # Adjust according to actual layer count
     
 # Load the modified state dict into the new model
 model.load_state_dict(model_state_dict)
-tokenizer = WhisperTokenizerFast.from_pretrained("D:/proj/models/new_whisper_medium", task="transcribe", language="japanese", local_files_only=True)
+
+#tokenizer = WhisperTokenizerFast.from_pretrained("D:/proj/models/new_whisper_medium", task="transcribe", language="japanese", local_files_only=True)
 csv_file = 'D:/proj/datasets/gv_test/metadata.csv'
 audio_dir = 'D:/proj/datasets/gv_test/'
+options = whisper.DecodingOptions(language="ja", without_timestamps=True)
+tokenizer = whisper.tokenizer.get_tokenizer(True, language="ja", task=options.task)
 
 def load_wave(wave_path, sample_rate: int = 16000) -> torch.Tensor:
     waveform, sr = torchaudio.load(wave_path, normalize=True)
     if sample_rate != sr:
         waveform = torchaudio.transforms.Resample(sr, sample_rate)(waveform)
     return waveform
+
+import csv
+from torch.utils.data import Dataset
+import numpy as np
 
 class CustomAudioDataset(Dataset):
     def __init__(self, csv_file, audio_dir, tokenizer, sample_rate=16000):
@@ -426,38 +415,30 @@ class CustomAudioDataset(Dataset):
         audio_path = f'{self.audio_dir}/{audio_path}'
 
         audio = load_wave(audio_path, sample_rate=self.sample_rate)
-        audio = whisper.pad_or_trim(audio.flatten())
-        input_features = whisper.log_mel_spectrogram(audio, n_mels=80)
-
-        label_tokens = [self.tokenizer.bos_token_id] + self.tokenizer.encode(label) + [self.tokenizer.eos_token_id]
-        dec_input_features = label_tokens[:-1]
-        labels = label_tokens[1:]
 
         return {
-            'input_features': input_features,
-            'dec_input_features': dec_input_features,
-            'labels': labels
+            'audio': audio,
+            'label': label
         }
 
 dataset = CustomAudioDataset(csv_file, audio_dir, tokenizer)
 
-def train_val_dataset(dataset, val_split=0.001):
-    train_idx, val_idx = train_test_split(list(range(len(dataset))), test_size=val_split)
-    datasets = {}
-    datasets['train'] = Subset(dataset, train_idx)
-    datasets['val'] = Subset(dataset, val_idx)
-    return datasets
-
-datasets = train_val_dataset(dataset, val_split=0.001)
-train_dataset = datasets['train']
-eval_dataset = datasets['val']
-
 def collate_fn(batch):
     input_features, labels, dec_input_features = [], [], []
+    
     for f in batch:
-        input_features.append(f["input_features"])
-        labels.append(f["labels"])
-        dec_input_features.append(f["dec_input_features"])
+        # Convert audio to features here
+        audio = whisper.pad_or_trim(f["audio"].flatten())
+        input_feature = whisper.log_mel_spectrogram(audio, n_mels=80)
+
+        label = f["label"]
+        label_tokens = [tokenizer.bos_token_id] + tokenizer.encode(label) + [tokenizer.eos_token_id]
+        dec_input_feature = label_tokens[:-1]
+        label = label_tokens[1:]
+
+        input_features.append(input_feature)
+        labels.append(label)
+        dec_input_features.append(dec_input_feature)
 
     input_features = torch.stack(input_features)
 
@@ -482,6 +463,18 @@ def collate_fn(batch):
     }
     return batch
 
+
+def train_val_dataset(dataset, val_split=0.001):
+    train_idx, val_idx = train_test_split(list(range(len(dataset))), test_size=val_split)
+    datasets = {}
+    datasets['train'] = Subset(dataset, train_idx)
+    datasets['val'] = Subset(dataset, val_idx)
+    return datasets
+
+datasets = train_val_dataset(dataset, val_split=0.001)
+train_dataset = datasets['train']
+eval_dataset = datasets['val']
+
 metrics_cer = evaluate.load("cer")
 metrics_wer = evaluate.load("wer")
 
@@ -501,9 +494,10 @@ def train_dataloader():
     return DataLoader(
         train_dataset,
         batch_size=1,  # Adjust batch size as needed
-        drop_last=False, 
+        drop_last=True, 
         shuffle=True, 
         num_workers=0,
+        pin_memory=True,
         collate_fn=collate_fn
     )
 
@@ -511,25 +505,23 @@ def eval_dataloader():
     return DataLoader(
         eval_dataset,
         batch_size=1,  # Adjust batch size as needed
-        drop_last=False,
-        shuffle=False,
+        drop_last=True,
+        shuffle=True,
         num_workers=0,
+        pin_memory=True,
         collate_fn=collate_fn
     )
-    
-import logging
-import os
-from torch.utils.tensorboard import SummaryWriter
 
+# Create directories for checkpoints and logs
 checkpoint_dir = 'D:/proj/models/ckpt/'
 os.makedirs(checkpoint_dir, exist_ok=True)
 log_dir = 'D:/proj/models/ckpt/logs/'
 os.makedirs(log_dir, exist_ok=True)
 
-# Create a SummaryWriter for TensorBoard, saving logs to the specified directory
+# Create a SummaryWriter for TensorBoard
 writer = SummaryWriter(log_dir)
 
-# Set up logging to a file
+# Set up logging
 logging.basicConfig(
     filename=os.path.join(log_dir, 'training.log'), 
     filemode='w', 
@@ -537,15 +529,10 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# Verify the dataset
-print(f"Number of samples in dataset: {len(dataset)}")
-for i in range(min(3, len(dataset))):  # Print first few samples for verification
-    print(f"Sample {i}: {dataset[i]}")
-
-def train_and_evaluate(model, train_loader, eval_loader, optimizer, loss_fn, num_epochs=1, device='cuda', accumulation_steps=1, clear_cache=True, log_interval=5, eval_interval=100, save_interval=100, checkpoint_dir=checkpoint_dir, log_dir=log_dir):
+def train_and_evaluate(model, train_loader, eval_loader, optimizer, loss_fn, scheduler, num_epochs=1, device='cuda', accumulation_steps=1, clear_cache=True, log_interval=5, eval_interval=100, save_interval=100, checkpoint_dir=checkpoint_dir, log_dir=log_dir):
     model.to(device)
-    os.makedirs(checkpoint_dir, exist_ok=True)
     global_step = 0
+    scaler = GradScaler()
 
     for epoch in range(num_epochs):
         model.train()
@@ -558,21 +545,21 @@ def train_and_evaluate(model, train_loader, eval_loader, optimizer, loss_fn, num
             labels = batch['labels'].long().to(device)
             dec_input_features = batch['dec_input_features'].to(device)
 
-            # Forward pass
-            encoder_outputs = model.encoder(input_features)
-            decoder_outputs = model.decoder(dec_input_features, encoder_outputs)
+            with autocast(dtype=torch.float16):
+                # Forward pass
+                encoder_outputs = model.encoder(input_features)
+                decoder_outputs = model.decoder(dec_input_features, encoder_outputs)
+                logits = decoder_outputs.view(-1, decoder_outputs.size(-1))
+                loss = loss_fn(logits, labels.view(-1))
+                total_loss += loss.item()
+                loss = loss / accumulation_steps
 
-            logits = decoder_outputs.view(-1, decoder_outputs.size(-1))
-            loss = loss_fn(logits, labels.view(-1))
-
-            total_loss += loss.item()
-
-            # Backward pass
-            loss.backward()
-
+            scaler.scale(loss).backward()
+            
             # Perform optimization step every accumulation_steps
             if (step + 1) % accumulation_steps == 0:
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 optimizer.zero_grad()
 
                 # Optionally clear cache
@@ -606,12 +593,8 @@ def train_and_evaluate(model, train_loader, eval_loader, optimizer, loss_fn, num
                         loss = loss_fn(logits, labels.view(-1))
                         eval_loss += loss.item()
 
-                        all_predictions.append(torch.argmax(decoder_outputs, dim=-1).cpu().numpy())
-                        all_labels.append(labels.cpu().numpy())
-
-                # Flatten the lists of lists into a single list for decoding
-                all_predictions = [item for sublist in all_predictions for item in sublist]
-                all_labels = [item for sublist in all_labels for item in sublist]
+                        all_predictions.extend(torch.argmax(decoder_outputs, dim=-1).cpu().numpy().tolist())
+                        all_labels.extend(labels.cpu().numpy().tolist())
 
                 # Prepare for metric computation
                 predictions = {
@@ -627,6 +610,9 @@ def train_and_evaluate(model, train_loader, eval_loader, optimizer, loss_fn, num
                 print(f"Step {global_step}, Eval Loss: {eval_loss / len(eval_loader)}, CER: {metrics['cer']}, WER: {metrics['wer']}")
                 logging.info(f"Step {global_step}, Eval Loss: {eval_loss / len(eval_loader)}, CER: {metrics['cer']}, WER: {metrics['wer']}")
 
+                # Step the scheduler based on evaluation loss
+                scheduler.step(eval_loss / len(eval_loader))
+
                 # Print sample predictions and labels for verification
                 sample_indices = range(min(3, len(all_predictions)))  # Print up to 3 sample predictions
                 for idx in sample_indices:
@@ -634,7 +620,7 @@ def train_and_evaluate(model, train_loader, eval_loader, optimizer, loss_fn, num
                     label_str = tokenizer.decode(all_labels[idx], skip_special_tokens=True)
                     print(f"Sample {idx}: Prediction: {pred_str}, Label: {label_str}")
                     logging.info(f"Sample {idx}: Prediction: {pred_str}, Label: {label_str}")
-                
+
                 model.train()
 
             # Save model at specified intervals
@@ -653,30 +639,37 @@ def train_and_evaluate(model, train_loader, eval_loader, optimizer, loss_fn, num
     print(f"Final model saved to {final_model_path}")
     logging.info(f"Final model saved to {final_model_path}")
 
-optimizer = Adafactor(
+# Optimizer setup
+optimizer = optim.Adafactor(
     model.parameters(), 
-    scale_parameter=True, 
-    relative_step=True, 
-    warmup_init=True, 
-    lr=None
+    lr=0.025, 
+    beta2_decay=-0.8, 
+    eps=(None, 0.001), 
+    d=1.0, 
+    weight_decay=0.0, 
+    foreach=None, 
+    maximize=False
 )
 
+# Loss function
 loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
+
+# Scheduler setup
+scheduler = lr_scheduler.ReduceLROnPlateau(
+    optimizer,
+    mode='min',
+    factor=0.1,
+    patience=10,
+    threshold=0.0001,
+    threshold_mode='rel',
+    cooldown=0,
+    min_lr=0,
+    eps=1e-08
+)
 
 # Create DataLoaders
 train_loader = train_dataloader()
 eval_loader = eval_dataloader()
 
-# Train and evaluate the model with logging, evaluation, model saving, and debugging
-train_and_evaluate(model, train_loader, eval_loader, optimizer, loss_fn, num_epochs=1, device='cuda', accumulation_steps=1, clear_cache=True, log_interval=5, eval_interval=10, save_interval=100, checkpoint_dir=checkpoint_dir, log_dir=log_dir)
-
-
-checkpoint_path = "D:/proj/models/ckpt/checkpoint_epoch_x_step_x.pt"
-checkpoint = torch.load(checkpoint_path)
-model.load_state_dict(checkpoint['model_state_dict'])
-optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-start_epoch = checkpoint['epoch']
-start_step = checkpoint['step']
-loss = checkpoint['loss']
-
-
+# Train and evaluate the model with logging, evaluation, and model saving
+train_and_evaluate(model, train_loader, eval_loader, optimizer, loss_fn, scheduler, num_epochs=1, device='cuda', accumulation_steps=1, clear_cache=True, log_interval=5, eval_interval=10, save_interval=100, checkpoint_dir=checkpoint_dir, log_dir=log_dir)
