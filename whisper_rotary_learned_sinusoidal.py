@@ -8,7 +8,6 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, Subset
 from sklearn.model_selection import train_test_split
 import torchaudio, csv, whisper
-import numpy as np
 from tqdm import tqdm
 from transformers import WhisperTokenizerFast, WhisperForConditionalGeneration
 from torch.profiler import profile, record_function, ProfilerActivity
