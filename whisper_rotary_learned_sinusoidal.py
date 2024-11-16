@@ -357,6 +357,84 @@ pretrained_state_dict = pretrained_model.state_dict()
 model = Whisper(dimensions).cuda()
 model_state_dict = model.state_dict()
 
+
+###########
+#For hugging face pretrained layer transfer (openai use the next one down)
+
+# Initialize your custom model
+class ModelDimensions:
+    def __init__(self, n_mels, n_audio_ctx, n_audio_state, n_audio_head, n_audio_layer, n_vocab, n_text_ctx, n_text_state, n_text_head, n_text_layer):
+        self.n_mels = n_mels
+        self.n_audio_ctx = n_audio_ctx
+        self.n_audio_state = n_audio_state
+        self.n_audio_head = n_audio_head
+        self.n_audio_layer = n_audio_layer
+        self.n_vocab = n_vocab
+        self.n_text_ctx = n_text_ctx
+        self.n_text_state = n_text_state
+        self.n_text_head = n_text_head
+        self.n_text_layer = n_text_layer
+
+# Define model dimensions
+dimensions = ModelDimensions(
+    n_mels=80, 
+    n_audio_ctx=1500, 
+    n_audio_state=768, 
+    n_audio_head=12, 
+    n_audio_layer=8, 
+    n_vocab=51865, 
+    n_text_ctx=448, 
+    n_text_state=768, 
+    n_text_head=12, 
+    n_text_layer=8
+)
+
+# Initialize your model with the defined dimensions
+model = Whisper(dimensions).cuda()
+
+# Helper function to transfer layers
+def transfer_layer(source_model, target_model, source_layer_name, target_layer_name):
+    source_layer = dict(source_model.named_parameters()).get(source_layer_name)
+    target_layer = dict(target_model.named_parameters()).get(target_layer_name)
+    if source_layer is not None and target_layer is not None:
+        target_layer.data.copy_(source_layer.data)
+
+# Load pretrained model
+pretrained_model_name = "openai/whisper-small"
+pretrained_model = WhisperForConditionalGeneration.from_pretrained(pretrained_model_name)
+
+# Transfer convolutional layers
+transfer_layer(pretrained_model, model, 'model.encoder.conv1.weight', 'encoder.conv1.weight')
+transfer_layer(pretrained_model, model, 'model.encoder.conv1.bias', 'encoder.conv1.bias')
+transfer_layer(pretrained_model, model, 'model.encoder.conv2.weight', 'encoder.conv2.weight')
+transfer_layer(pretrained_model, model, 'model.encoder.conv2.bias', 'encoder.conv2.bias')
+
+# Transfer multi-head attention layers and MLPs, avoid custom implementations (adjust number of layers as necessary)
+for i in range(8):  # Adjust according to actual layer count
+    # Encoder MLP layers
+    transfer_layer(pretrained_model, model, f'model.encoder.layers.{i}.fc1.weight', f'encoder.blocks.{i}.mlp.0.weight')
+    transfer_layer(pretrained_model, model, f'model.encoder.layers.{i}.fc1.bias', f'encoder.blocks.{i}.mlp.0.bias')
+    transfer_layer(pretrained_model, model, f'model.encoder.layers.{i}.fc2.weight', f'encoder.blocks.{i}.mlp.2.weight')
+    transfer_layer(pretrained_model, model, f'model.encoder.layers.{i}.fc2.bias', f'encoder.blocks.{i}.mlp.2.bias')
+
+    # Decoder MLP layers
+    transfer_layer(pretrained_model, model, f'model.decoder.layers.{i}.fc1.weight', f'decoder.blocks.{i}.mlp.0.weight')
+    transfer_layer(pretrained_model, model, f'model.decoder.layers.{i}.fc1.bias', f'decoder.blocks.{i}.mlp.0.bias')
+    transfer_layer(pretrained_model, model, f'model.decoder.layers.{i}.fc2.weight', f'decoder.blocks.{i}.mlp.2.weight')
+    transfer_layer(pretrained_model, model, f'model.decoder.layers.{i}.fc2.bias', f'decoder.blocks.{i}.mlp.2.bias')
+
+# Transfer remaining layers if applicable
+transfer_layer(pretrained_model, model, 'model.encoder.layer_norm.weight', 'encoder.ln_post.weight')
+transfer_layer(pretrained_model, model, 'model.encoder.layer_norm.bias', 'encoder.ln_post.bias')
+transfer_layer(pretrained_model, model, 'model.decoder.layer_norm.weight', 'decoder.ln.weight')
+transfer_layer(pretrained_model, model, 'model.decoder.layer_norm.bias', 'decoder.ln.bias')
+
+# Verify that the layers have been transferred correctly
+for name, param in model.named_parameters():
+    print(f'{name}: {param.shape}')
+##########
+
+
 def transfer_layer(src_name, tgt_name):
     if src_name in pretrained_state_dict and tgt_name in model_state_dict:
         src_tensor = pretrained_state_dict[src_name]
